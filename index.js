@@ -13,7 +13,6 @@ const client = new Client({
   ],
 });
 
-// Queue par serveur
 const queues = new Map();
 
 function getQueue(guildId) {
@@ -62,50 +61,28 @@ async function playNext(guildId, textChannel) {
   }
 }
 
-// ──────────────────────────────────────────────
-// Scraping Spotify sans API
-// ──────────────────────────────────────────────
-
 async function resolveSpotifyUrl(url) {
-  // On récupère la page HTML de Spotify et on extrait les titres depuis les métadonnées JSON
+  const { getData } = await import('spotify-url-info');
   const fetch = (await import('node-fetch')).default;
+  const data = await getData(url, fetch);
 
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
-    }
-  });
-
-  const html = await res.text();
-
-  // Spotify injecte les données dans une balise <script type="application/ld+json">
-  const ldJsonMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
-  if (!ldJsonMatch) throw new Error('Impossible de trouver les données Spotify dans la page.');
-
-  const data = JSON.parse(ldJsonMatch[1]);
   const tracks = [];
 
-  // Playlist ou album : data.track est un tableau
-  if (data.track && Array.isArray(data.track)) {
-    for (const t of data.track) {
-      const artist = t.byArtist?.name || '';
-      const name = t.name || '';
-      if (name) tracks.push(`${artist} ${name}`.trim());
-    }
-  }
-  // Track seule
-  else if (data.name && data.byArtist) {
-    const artist = data.byArtist?.name || '';
+  if (data.type === 'track') {
+    const artist = data.artists?.[0]?.name || '';
     tracks.push(`${artist} ${data.name}`.trim());
+  } else if (data.type === 'playlist' || data.type === 'album') {
+    const items = data.tracks?.items || [];
+    for (const item of items) {
+      const track = item.track || item;
+      if (!track || !track.name) continue;
+      const artist = track.artists?.[0]?.name || '';
+      tracks.push(`${artist} ${track.name}`.trim());
+    }
   }
 
   return tracks;
 }
-
-// ──────────────────────────────────────────────
-// Gestion des messages
-// ──────────────────────────────────────────────
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
@@ -116,17 +93,15 @@ client.on('messageCreate', async (message) => {
   const args    = message.content.slice(prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // ── !play ────────────────────────────────────
   if (command === 'play') {
     const input = args.join(' ');
-    if (!input) return message.reply('❌ Donne-moi une URL Spotify ou un nom de chanson !\nEx : `!play https://open.spotify.com/playlist/...`');
+    if (!input) return message.reply('❌ Donne-moi une URL Spotify ou un nom de chanson !');
 
     const voiceChannel = message.member?.voice?.channel;
     if (!voiceChannel) return message.reply('❌ Tu dois être dans un salon vocal !');
 
     const queue = getQueue(message.guild.id);
 
-    // Connexion vocale
     if (!queue.connection || queue.connection.state.status === VoiceConnectionStatus.Destroyed) {
       queue.connection = joinVoiceChannel({
         channelId: voiceChannel.id,
@@ -183,7 +158,6 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // ── !skip ────────────────────────────────────
   else if (command === 'skip') {
     const queue = getQueue(message.guild.id);
     if (!queue.player || !queue.current) return message.reply('❌ Rien ne joue en ce moment.');
@@ -191,7 +165,6 @@ client.on('messageCreate', async (message) => {
     message.reply('⏭️ Piste suivante !');
   }
 
-  // ── !pause ───────────────────────────────────
   else if (command === 'pause') {
     const queue = getQueue(message.guild.id);
     if (!queue.player) return message.reply('❌ Rien ne joue.');
@@ -199,7 +172,6 @@ client.on('messageCreate', async (message) => {
     message.reply('⏸️ Musique en pause.');
   }
 
-  // ── !resume ──────────────────────────────────
   else if (command === 'resume') {
     const queue = getQueue(message.guild.id);
     if (!queue.player) return message.reply('❌ Rien ne joue.');
@@ -207,7 +179,6 @@ client.on('messageCreate', async (message) => {
     message.reply('▶️ Reprise de la lecture !');
   }
 
-  // ── !stop ────────────────────────────────────
   else if (command === 'stop') {
     const queue = getQueue(message.guild.id);
     queue.tracks = [];
@@ -218,7 +189,6 @@ client.on('messageCreate', async (message) => {
     message.reply('⏹️ Lecture arrêtée et file d\'attente vidée.');
   }
 
-  // ── !queue ───────────────────────────────────
   else if (command === 'queue' || command === 'q') {
     const queue = getQueue(message.guild.id);
     if (!queue.current && queue.tracks.length === 0) return message.reply('📭 La file d\'attente est vide.');
@@ -233,7 +203,6 @@ client.on('messageCreate', async (message) => {
     message.reply(lines.join('\n'));
   }
 
-  // ── !help ────────────────────────────────────
   else if (command === 'help') {
     message.reply([
       '🎵 **Commandes du bot musique :**',
