@@ -1,7 +1,6 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Collection } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState } = require('@discordjs/voice');
-const { SpotifyApi } = require('@spotify/web-api-ts-sdk');
+const { Client, GatewayIntentBits } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus } = require('@discordjs/voice');
 const ytSearch = require('yt-search');
 const ytdl = require('@distube/ytdl-core');
 
@@ -14,18 +13,8 @@ const client = new Client({
   ],
 });
 
-// Queue par serveur : Map<guildId, { tracks, player, connection, current }>
+// Queue par serveur
 const queues = new Map();
-
-// Initialisation Spotify SDK
-const spotify = SpotifyApi.withClientCredentials(
-  process.env.SPOTIFY_CLIENT_ID,
-  process.env.SPOTIFY_CLIENT_SECRET
-);
-
-// ──────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────
 
 function getQueue(guildId) {
   if (!queues.has(guildId)) {
@@ -43,7 +32,7 @@ async function playNext(guildId, textChannel) {
   const queue = getQueue(guildId);
   if (queue.tracks.length === 0) {
     queue.current = null;
-    textChannel.send('✅ File d\'attente terminée ! Le bot quitte le salon vocal dans 30s d\'inactivité.');
+    textChannel.send('✅ File d\'attente terminée ! Le bot quitte le salon vocal dans 30s.');
     setTimeout(() => {
       if (queue.tracks.length === 0 && queue.connection) {
         queue.connection.destroy();
@@ -74,34 +63,41 @@ async function playNext(guildId, textChannel) {
 }
 
 // ──────────────────────────────────────────────
-// Extraction des pistes Spotify
+// Scraping Spotify sans API
 // ──────────────────────────────────────────────
 
 async function resolveSpotifyUrl(url) {
-  const playlistMatch = url.match(/playlist\/([a-zA-Z0-9]+)/);
-  const trackMatch    = url.match(/track\/([a-zA-Z0-9]+)/);
-  const albumMatch    = url.match(/album\/([a-zA-Z0-9]+)/);
+  // On récupère la page HTML de Spotify et on extrait les titres depuis les métadonnées JSON
+  const fetch = (await import('node-fetch')).default;
 
-  let tracks = [];
-
-  if (playlistMatch) {
-    const id = playlistMatch[1];
-    let offset = 0;
-    while (true) {
-      const res = await spotify.playlists.getPlaylistItems(id, undefined, undefined, 50, offset);
-      const items = res.items.filter(i => i.track && i.track.name);
-      tracks.push(...items.map(i => `${i.track.artists[0].name} ${i.track.name}`));
-      if (res.items.length < 50) break;
-      offset += 50;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8',
     }
-  } else if (albumMatch) {
-    const id = albumMatch[1];
-    const res = await spotify.albums.tracks(id, undefined, 50);
-    tracks = res.items.map(t => `${t.artists[0].name} ${t.name}`);
-  } else if (trackMatch) {
-    const id = trackMatch[1];
-    const t = await spotify.tracks.get(id);
-    tracks = [`${t.artists[0].name} ${t.name}`];
+  });
+
+  const html = await res.text();
+
+  // Spotify injecte les données dans une balise <script type="application/ld+json">
+  const ldJsonMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+  if (!ldJsonMatch) throw new Error('Impossible de trouver les données Spotify dans la page.');
+
+  const data = JSON.parse(ldJsonMatch[1]);
+  const tracks = [];
+
+  // Playlist ou album : data.track est un tableau
+  if (data.track && Array.isArray(data.track)) {
+    for (const t of data.track) {
+      const artist = t.byArtist?.name || '';
+      const name = t.name || '';
+      if (name) tracks.push(`${artist} ${name}`.trim());
+    }
+  }
+  // Track seule
+  else if (data.name && data.byArtist) {
+    const artist = data.byArtist?.name || '';
+    tracks.push(`${artist} ${data.name}`.trim());
   }
 
   return tracks;
@@ -120,7 +116,7 @@ client.on('messageCreate', async (message) => {
   const args    = message.content.slice(prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // ── !play <url spotify> ──────────────────────
+  // ── !play ────────────────────────────────────
   if (command === 'play') {
     const input = args.join(' ');
     if (!input) return message.reply('❌ Donne-moi une URL Spotify ou un nom de chanson !\nEx : `!play https://open.spotify.com/playlist/...`');
@@ -151,8 +147,7 @@ client.on('messageCreate', async (message) => {
       });
     }
 
-    // Résolution Spotify ou recherche directe
-    const loadingMsg = await message.reply('🔍 Récupération des pistes Spotify...');
+    const loadingMsg = await message.reply('🔍 Récupération des pistes...');
 
     let queries = [];
     if (input.includes('spotify.com')) {
@@ -168,9 +163,8 @@ client.on('messageCreate', async (message) => {
 
     if (queries.length === 0) return loadingMsg.edit('❌ Aucune piste trouvée dans ce lien Spotify.');
 
-    await loadingMsg.edit(`⏳ Recherche YouTube pour **${queries.length}** piste(s)... (peut prendre quelques secondes)`);
+    await loadingMsg.edit(`⏳ Recherche YouTube pour **${queries.length}** piste(s)...`);
 
-    // Recherche YouTube pour chaque titre (par batch pour ne pas spam)
     let added = 0;
     for (const q of queries) {
       const video = await searchYouTube(q);
@@ -184,7 +178,6 @@ client.on('messageCreate', async (message) => {
 
     await loadingMsg.edit(`✅ **${added}** piste(s) ajoutée(s) à la file d'attente !`);
 
-    // Démarre la lecture si rien ne joue
     if (!queue.current) {
       playNext(message.guild.id, message.channel);
     }
